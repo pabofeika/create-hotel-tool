@@ -190,7 +190,12 @@ async function huashiCreateConfig(hotelName, pinyinName) {
     updateDate: today,
     outageStartupStatus: '0',
     projectEndDate: endDateStr,
-    preFiles: fileKey ? JSON.stringify([{ fileKey, path: '/system/coocaa_hotel/login.txt' }]) : `/system/coocaa_hotel/login.txt`,
+    preFiles: fileKey ? `/system/coocaa_hotel/login.txt` : '',
+    preFileList: fileKey ? [{
+      fileKey: fileKey,
+      fileName: 'login.txt',
+      filePath: '/system/coocaa_hotel/login.txt'
+    }] : [],
     configInfo: loginContent,
     commentary: `酒店创建: ${hotelName} (${pinyinName})`,
   };
