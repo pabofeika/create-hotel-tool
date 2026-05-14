@@ -8,6 +8,7 @@ const axios = require('axios');
 const FormData = require('form-data');
 const path = require('path');
 const fs = require('fs');
+const crypto = require('crypto');
 const { EventEmitter } = require('events');
 
 // ==================== 配置 ====================
@@ -86,6 +87,68 @@ async function huashiCreateShop(shopName) {
   throw new Error(`创建门店失败: ${JSON.stringify(res.data)}`);
 }
 
+/** 上传文件三步走：init → uploadPart → complete，返回 fileKey */
+async function huashiUploadFile(fileContent, fileName, token) {
+  const http = createHttpClient();
+  const md5 = crypto.createHash('md5').update(fileContent).digest('hex');
+  const buf = Buffer.from(fileContent, 'utf-8');
+  const fileSize = buf.length + '';
+
+  // Step 1: Init - 获取 uploadId
+  const key = crypto.randomUUID();
+  const initRes = await http.get(`${CONFIG.huashiUrl}/web/cos/init`, {
+    params: { key, _t: Date.now() },
+    headers: { token },
+  });
+  if (!initRes.data || initRes.data.code !== 0) {
+    throw new Error(`文件上传init失败: ${JSON.stringify(initRes.data)}`);
+  }
+  const { uploadId } = initRes.data;
+
+  // Step 2: Upload Part - 上传文件分片
+  const boundary = '----' + Date.now().toString(36);
+  const partSize = Math.max(fileSize, 1);
+
+  let partBody = '';
+  partBody += `--${boundary}\r\n`;
+  partBody += `Content-Disposition: form-data; name="key"\r\n\r\n${key}\r\n`;
+  partBody += `--${boundary}\r\n`;
+  partBody += `Content-Disposition: form-data; name="partNumber"\r\n\r\n1\r\n`;
+  partBody += `--${boundary}\r\n`;
+  partBody += `Content-Disposition: form-data; name="partSize"\r\n\r\n${partSize}\r\n`;
+  partBody += `--${boundary}\r\n`;
+  partBody += `Content-Disposition: form-data; name="uploadId"\r\n\r\n${uploadId}\r\n`;
+  partBody += `--${boundary}\r\n`;
+  partBody += `Content-Disposition: form-data; name="file"; filename="${fileName}"\r\n`;
+  partBody += `Content-Type: text/plain\r\n\r\n`;
+  partBody += fileContent;
+  partBody += `\r\n--${boundary}--\r\n`;
+
+  const partRes = await http.post(`${CONFIG.huashiUrl}/web/cos/uploadPart`, partBody, {
+    headers: {
+      'Content-Type': `multipart/form-data; boundary=${boundary}`,
+      token,
+    },
+    maxBodyLength: 1024 * 1024,
+  });
+
+  // Step 3: Complete - 合并文件
+  const completeRes = await http.post(`${CONFIG.huashiUrl}/web/cos/complete`, {
+    key,
+    uploadId,
+    fileName,
+    md5Code: md5,
+    totalSize: fileSize,
+  }, {
+    headers: { 'Content-Type': 'application/json', token },
+  });
+
+  if (completeRes.data && completeRes.data.code === 0 && completeRes.data.data) {
+    return completeRes.data.data.fileKey;
+  }
+  throw new Error(`文件上传complete失败: ${JSON.stringify(completeRes.data)}`);
+}
+
 /** 创建预设配置（含刷机码生成）*/
 async function huashiCreateConfig(hotelName, pinyinName) {
   const token = await ensureHuashiToken();
@@ -102,6 +165,19 @@ async function huashiCreateConfig(hotelName, pinyinName) {
   }
 
   const today = getTodayStr();
+  const endDate = new Date(Date.now() + 40 * 86400000);
+  const endDateStr = `${endDate.getFullYear()}-${String(endDate.getMonth()+1).padStart(2,'0')}-${String(endDate.getDate()).padStart(2,'0')} 00:00:00`;
+
+  const loginContent = `IP=193.112.221.196:80/hotel\nROOM_NUM=\nUN=${pinyinName}\nPWD=123`;
+
+  // 上传 login.txt 并获取 fileKey
+  let fileKey = '';
+  try {
+    fileKey = await huashiUploadFile(loginContent, 'login.txt', token);
+  } catch (err) {
+    // 上传失败不阻塞流程
+  }
+
   const body = {
     activeNumber: null,
     projectCount: 1,
@@ -112,11 +188,10 @@ async function huashiCreateConfig(hotelName, pinyinName) {
     createDate: today,
     updateDate: today,
     outageStartupStatus: '0',
-    projectEndDate: new Date(Date.now() + 40 * 86400000).toISOString().split('T')[0] + ' 00:00:00',
-    // login.txt 内容通过 configInfo 传递
-    configInfo: `IP=193.112.221.196:80/hotel\nROOM_NUM=\nUN=${pinyinName}\nPWD=123`,
-    preFiles: '/system/coocaa_hotel',
-    commentary: `酒店创建: ${hotelName}`,
+    projectEndDate: endDateStr,
+    preFiles: fileKey ? JSON.stringify([{ fileKey, path: '/system/coocaa_hotel/login.txt' }]) : `/system/coocaa_hotel/login.txt`,
+    configInfo: loginContent,
+    commentary: `酒店创建: ${hotelName} (${pinyinName})`,
   };
 
   const res = await http.post(`${CONFIG.huashiUrl}/web/huashiconfig`, body, {
@@ -656,6 +731,7 @@ class HotelWorkflowExecutor {
     this._progress('huashi', '正在创建预设配置并生成刷机码...');
     this.flashCode = await huashiCreateConfig(hotelName, pinyinName);
     this._progress('huashi', `✅ 刷机码: ${this.flashCode}`);
+    this._progress('huashi', `✅ 预制文件已上传`);
   }
 }
 
