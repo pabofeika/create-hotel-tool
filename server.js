@@ -110,6 +110,7 @@ function addHistoryRecord(data) {
     pinyinName: data.pinyinName,
     finalUsername: data.finalUsername,
     status: data.status || 'success',
+    flashCode: data.flashCode || '',
     createdAt: getTodayStr(),
   };
   records.unshift(record); // 最新记录在最前面
@@ -636,6 +637,20 @@ app.delete('/api/history/:id', (req, res) => {
 app.delete('/api/history', (req, res) => {
   writeHistory([]);
   res.json({ success: true });
+});
+
+/** 更新刷机码 */
+app.patch('/api/history/:id/flashcode', (req, res) => {
+  const { flashCode } = req.body;
+  if (!flashCode) return res.status(400).json({ error: '缺少刷机码' });
+  
+  const records = readHistory();
+  const record = records.find(r => r.id === req.params.id);
+  if (!record) return res.status(404).json({ error: '记录未找到' });
+  
+  record.flashCode = flashCode;
+  writeHistory(records);
+  res.json({ success: true, record });
 });
 
 // 启动服务器
