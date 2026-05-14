@@ -79,6 +79,44 @@ function getHostDisplay(url) {
   try { return new URL(url).hostname; } catch { return url; }
 }
 
+// ==================== 历史记录 ====================
+
+const HISTORY_FILE = path.join(__dirname, 'history.json');
+
+/** 读取历史记录 */
+function readHistory() {
+  try {
+    if (fs.existsSync(HISTORY_FILE)) {
+      return JSON.parse(fs.readFileSync(HISTORY_FILE, 'utf-8'));
+    }
+  } catch (err) {
+    console.error('读取历史记录失败:', err.message);
+  }
+  return [];
+}
+
+/** 写入历史记录 */
+function writeHistory(records) {
+  fs.writeFileSync(HISTORY_FILE, JSON.stringify(records, null, 2), 'utf-8');
+}
+
+/** 添加一条历史记录 */
+function addHistoryRecord(data) {
+  const records = readHistory();
+  const record = {
+    id: Date.now().toString(36) + '-' + Math.random().toString(36).substring(2, 6),
+    hotelName: data.hotelName,
+    hotelId: data.hotelId,
+    pinyinName: data.pinyinName,
+    finalUsername: data.finalUsername,
+    status: data.status || 'success',
+    createdAt: getTodayStr(),
+  };
+  records.unshift(record); // 最新记录在最前面
+  writeHistory(records);
+  return record;
+}
+
 // ==================== 工作流执行器 ====================
 
 class HotelWorkflowExecutor {
@@ -539,6 +577,7 @@ app.get('/api/workflow/sse', (req, res) => {
   executor.run(hotelName).then((result) => {
     clearInterval(keepaliveTimer);
     if (result.success) {
+      addHistoryRecord(result); // 自动保存历史记录
       res.write(`data: ${JSON.stringify({ step: 'complete', ...result })}\n\n`);
     } else {
       res.write(`data: ${JSON.stringify({ step: 'error', error: result.error || '执行失败' })}\n\n`);
@@ -567,7 +606,36 @@ app.post('/api/workflow/run', async (req, res) => {
   });
 
   const result = await executor.run(name);
+  // 成功时自动保存历史
+  if (result.success) {
+    addHistoryRecord(result);
+  }
   res.json({ ...result, logs });
+});
+
+// ==================== 历史记录 API ====================
+
+/** 获取历史记录列表 */
+app.get('/api/history', (req, res) => {
+  const records = readHistory();
+  res.json(records);
+});
+
+/** 删除单条历史记录 */
+app.delete('/api/history/:id', (req, res) => {
+  const records = readHistory();
+  const filtered = records.filter(r => r.id !== req.params.id);
+  if (filtered.length === records.length) {
+    return res.status(404).json({ error: '记录未找到' });
+  }
+  writeHistory(filtered);
+  res.json({ success: true });
+});
+
+/** 清空全部历史记录 */
+app.delete('/api/history', (req, res) => {
+  writeHistory([]);
+  res.json({ success: true });
 });
 
 // 启动服务器
