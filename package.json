@@ -1,7 +1,7 @@
 {
   "name": "create-hotel-tool",
   "version": "1.0.0",
-  "description": "酒店管理系统 - 批量创建酒店本地工具（n8n工作流本地化）",
+  "description": "酒店管理系统 - 创建酒店本地自动化工具",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
