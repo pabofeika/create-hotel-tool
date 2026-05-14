@@ -87,58 +87,72 @@ async function huashiCreateShop(shopName) {
   throw new Error(`创建门店失败: ${JSON.stringify(res.data)}`);
 }
 
-/** 上传文件三步走：init → uploadPart → complete，返回 fileKey */
+/** 上传文件：小于10M直接上传，大于10M分片上传，返回 fileKey */
 async function huashiUploadFile(fileContent, fileName, token) {
   const http = createHttpClient();
-  const md5 = crypto.createHash('md5').update(fileContent).digest('hex');
   const buf = Buffer.from(fileContent, 'utf-8');
-  const fileSize = buf.length + '';
+  const md5 = crypto.createHash('md5').update(fileContent).digest('hex');
+  const fileSize = buf.length;
 
-  // Step 1: Init - 获取 uploadId
+  if (fileSize < 10 * 1024 * 1024) {
+    // 小于10M：直接上传
+    const boundary = '----' + Date.now().toString(36);
+    let body = '';
+    body += `--${boundary}\r\n`;
+    body += `Content-Disposition: form-data; name="file"; filename="${fileName}"\r\n`;
+    body += `Content-Type: text/plain\r\n\r\n`;
+    body += fileContent;
+    body += `\r\n--${boundary}\r\n`;
+    body += `Content-Disposition: form-data; name="md5Code"\r\n\r\n`;
+    body += md5;
+    body += `\r\n--${boundary}--\r\n`;
+
+    const res = await http.post(`${CONFIG.huashiUrl}/web/cos/upload`, body, {
+      headers: { 'Content-Type': `multipart/form-data; boundary=${boundary}`, token },
+      maxBodyLength: 1024 * 1024,
+    });
+    if (res.data && res.data.code === 0 && res.data.data) {
+      return res.data.data.fileKey;
+    }
+    throw new Error(`文件上传失败: ${JSON.stringify(res.data)}`);
+  }
+
+  // 大于等于10M：分片上传（init → uploadPart → complete）
   const key = crypto.randomUUID();
   const initRes = await http.get(`${CONFIG.huashiUrl}/web/cos/init`, {
     params: { key, _t: Date.now() },
     headers: { token },
   });
   if (!initRes.data || initRes.data.code !== 0) {
-    throw new Error(`文件上传init失败: ${JSON.stringify(initRes.data)}`);
+    throw new Error(`文件分片上传init失败: ${JSON.stringify(initRes.data)}`);
   }
   const { uploadId } = initRes.data;
 
-  // Step 2: Upload Part - 上传文件分片
-  const boundary = '----' + Date.now().toString(36);
-  const partSize = Math.max(fileSize, 1);
-
+  const boundary2 = '----' + Date.now().toString(36);
   let partBody = '';
-  partBody += `--${boundary}\r\n`;
+  partBody += `--${boundary2}\r\n`;
   partBody += `Content-Disposition: form-data; name="key"\r\n\r\n${key}\r\n`;
-  partBody += `--${boundary}\r\n`;
+  partBody += `--${boundary2}\r\n`;
   partBody += `Content-Disposition: form-data; name="partNumber"\r\n\r\n1\r\n`;
-  partBody += `--${boundary}\r\n`;
-  partBody += `Content-Disposition: form-data; name="partSize"\r\n\r\n${partSize}\r\n`;
-  partBody += `--${boundary}\r\n`;
+  partBody += `--${boundary2}\r\n`;
+  partBody += `Content-Disposition: form-data; name="partSize"\r\n\r\n${fileSize}\r\n`;
+  partBody += `--${boundary2}\r\n`;
   partBody += `Content-Disposition: form-data; name="uploadId"\r\n\r\n${uploadId}\r\n`;
-  partBody += `--${boundary}\r\n`;
+  partBody += `--${boundary2}\r\n`;
   partBody += `Content-Disposition: form-data; name="file"; filename="${fileName}"\r\n`;
   partBody += `Content-Type: text/plain\r\n\r\n`;
   partBody += fileContent;
-  partBody += `\r\n--${boundary}--\r\n`;
+  partBody += `\r\n--${boundary2}--\r\n`;
 
   const partRes = await http.post(`${CONFIG.huashiUrl}/web/cos/uploadPart`, partBody, {
-    headers: {
-      'Content-Type': `multipart/form-data; boundary=${boundary}`,
-      token,
-    },
+    headers: { 'Content-Type': `multipart/form-data; boundary=${boundary2}`, token },
     maxBodyLength: 1024 * 1024,
   });
 
-  // Step 3: Complete - 合并文件
   const completeRes = await http.post(`${CONFIG.huashiUrl}/web/cos/complete`, {
-    key,
-    uploadId,
-    fileName,
+    key, uploadId, fileName,
     md5Code: md5,
-    totalSize: fileSize,
+    totalSize: fileSize + '',
   }, {
     headers: { 'Content-Type': 'application/json', token },
   });
@@ -146,7 +160,7 @@ async function huashiUploadFile(fileContent, fileName, token) {
   if (completeRes.data && completeRes.data.code === 0 && completeRes.data.data) {
     return completeRes.data.data.fileKey;
   }
-  throw new Error(`文件上传complete失败: ${JSON.stringify(completeRes.data)}`);
+  throw new Error(`文件分片上传complete失败: ${JSON.stringify(completeRes.data)}`);
 }
 
 /** 创建预设配置（含刷机码生成）*/
