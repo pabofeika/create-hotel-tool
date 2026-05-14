@@ -95,20 +95,13 @@ async function huashiUploadFile(fileContent, fileName, token) {
   const fileSize = buf.length;
 
   if (fileSize < 10 * 1024 * 1024) {
-    // 小于10M：直接上传
-    const boundary = '----' + Date.now().toString(36);
-    let body = '';
-    body += `--${boundary}\r\n`;
-    body += `Content-Disposition: form-data; name="file"; filename="${fileName}"\r\n`;
-    body += `Content-Type: text/plain\r\n\r\n`;
-    body += fileContent;
-    body += `\r\n--${boundary}\r\n`;
-    body += `Content-Disposition: form-data; name="md5Code"\r\n\r\n`;
-    body += md5;
-    body += `\r\n--${boundary}--\r\n`;
+    // 小于10M：直接上传（使用 FormData）
+    const form = new FormData();
+    form.append('file', buf, { filename: fileName, contentType: 'text/plain' });
+    form.append('md5Code', md5);
 
-    const res = await http.post(`${CONFIG.huashiUrl}/web/cos/upload`, body, {
-      headers: { 'Content-Type': `multipart/form-data; boundary=${boundary}`, token },
+    const res = await http.post(`${CONFIG.huashiUrl}/web/cos/upload`, form, {
+      headers: { ...form.getHeaders(), token },
       maxBodyLength: 1024 * 1024,
     });
     if (res.data && res.data.code === 0 && res.data.data) {
@@ -128,31 +121,24 @@ async function huashiUploadFile(fileContent, fileName, token) {
   }
   const { uploadId } = initRes.data;
 
-  const boundary2 = '----' + Date.now().toString(36);
-  let partBody = '';
-  partBody += `--${boundary2}\r\n`;
-  partBody += `Content-Disposition: form-data; name="key"\r\n\r\n${key}\r\n`;
-  partBody += `--${boundary2}\r\n`;
-  partBody += `Content-Disposition: form-data; name="partNumber"\r\n\r\n1\r\n`;
-  partBody += `--${boundary2}\r\n`;
-  partBody += `Content-Disposition: form-data; name="partSize"\r\n\r\n${fileSize}\r\n`;
-  partBody += `--${boundary2}\r\n`;
-  partBody += `Content-Disposition: form-data; name="uploadId"\r\n\r\n${uploadId}\r\n`;
-  partBody += `--${boundary2}\r\n`;
-  partBody += `Content-Disposition: form-data; name="file"; filename="${fileName}"\r\n`;
-  partBody += `Content-Type: text/plain\r\n\r\n`;
-  partBody += fileContent;
-  partBody += `\r\n--${boundary2}--\r\n`;
+  // uploadPart: 用 FormData
+  const partForm = new FormData();
+  partForm.append('key', key);
+  partForm.append('partNumber', '1');
+  partForm.append('partSize', String(fileSize));
+  partForm.append('uploadId', uploadId);
+  partForm.append('file', buf, { filename: fileName, contentType: 'text/plain' });
 
-  const partRes = await http.post(`${CONFIG.huashiUrl}/web/cos/uploadPart`, partBody, {
-    headers: { 'Content-Type': `multipart/form-data; boundary=${boundary2}`, token },
+  await http.post(`${CONFIG.huashiUrl}/web/cos/uploadPart`, partForm, {
+    headers: { ...partForm.getHeaders(), token },
     maxBodyLength: 1024 * 1024,
   });
 
+  // complete: 合并
   const completeRes = await http.post(`${CONFIG.huashiUrl}/web/cos/complete`, {
     key, uploadId, fileName,
     md5Code: md5,
-    totalSize: fileSize + '',
+    totalSize: String(fileSize),
   }, {
     headers: { 'Content-Type': 'application/json', token },
   });
@@ -188,8 +174,9 @@ async function huashiCreateConfig(hotelName, pinyinName) {
   let fileKey = '';
   try {
     fileKey = await huashiUploadFile(loginContent, 'login.txt', token);
+    console.log(`[huashi] login.txt 上传成功, fileKey: ${fileKey}`);
   } catch (err) {
-    // 上传失败不阻塞流程
+    console.error(`[huashi] 文件上传失败: ${err.message}`);
   }
 
   const body = {
