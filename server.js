@@ -30,7 +30,103 @@ const CONFIG = {
 
   // 网络请求超时（毫秒）
   requestTimeout: parseInt(process.env.REQUEST_TIMEOUT || '30000'),
+
+  // 刷机平台
+  huashiUrl: process.env.HUASHI_URL || 'https://skyworth-business.com/huashi-api',
+  huashiUsername: process.env.HUASHI_USERNAME || 'chenlingN8N',
+  huashiPassword: process.env.HUASHI_PASSWORD || 'chenlingN8N',
 };
+
+// ==================== 刷机平台 API ====================
+
+let _huashiToken = null;
+let _huashiTokenExpire = 0;
+
+/** 登录刷机平台，获取 token */
+async function huashiLogin() {
+  const http = createHttpClient();
+  const url = `${CONFIG.huashiUrl}/admin/login`;
+  // 使用固定 uuid, captcha
+  const body = {
+    username: CONFIG.huashiUsername,
+    password: CONFIG.huashiPassword,
+    uuid: '23f99116-60ea-4f15-8508-28d54a1d03b3',
+    captcha: '1234',
+    loginType: '1',
+    phone: '',
+  };
+  const res = await http.post(url, body, { headers: { 'Content-Type': 'application/json' } });
+  if (res.data && res.data.code === 0 && res.data.data && res.data.data.token) {
+    _huashiToken = res.data.data.token;
+    _huashiTokenExpire = Date.now() + (res.data.data.expire || 43200) * 1000;
+    return _huashiToken;
+  }
+  throw new Error(`刷机平台登录失败: ${JSON.stringify(res.data)}`);
+}
+
+/** 确保 token 有效 */
+async function ensureHuashiToken() {
+  if (!_huashiToken || Date.now() >= _huashiTokenExpire - 60000) {
+    return await huashiLogin();
+  }
+  return _huashiToken;
+}
+
+/** 创建门店 */
+async function huashiCreateShop(shopName) {
+  const token = await ensureHuashiToken();
+  const http = createHttpClient();
+  const url = `${CONFIG.huashiUrl}/web/huashishop`;
+  const res = await http.post(url, { projectShop: shopName, shopUsers: [] }, {
+    headers: { 'Content-Type': 'application/json', token },
+  });
+  if (res.data && res.data.code === 0) {
+    return res.data;
+  }
+  throw new Error(`创建门店失败: ${JSON.stringify(res.data)}`);
+}
+
+/** 创建预设配置（含刷机码生成）*/
+async function huashiCreateConfig(hotelName, pinyinName) {
+  const token = await ensureHuashiToken();
+  const http = createHttpClient();
+
+  // 先去查门店列表，找到匹配的门店 ID
+  const shopRes = await http.get(`${CONFIG.huashiUrl}/web/huashishop/queryAllStoreAddr`, {
+    headers: { token },
+  });
+  let shopId = null;
+  if (shopRes.data && shopRes.data.code === 0 && shopRes.data.data) {
+    const match = shopRes.data.data.find(s => s.projectShop === hotelName);
+    if (match) shopId = match.id;
+  }
+
+  const today = getTodayStr();
+  const body = {
+    activeNumber: null,
+    projectCount: 1,
+    projectName: hotelName,
+    projectShop: shopId || '',
+    city: '深圳市',
+    county: '宝安区',
+    createDate: today,
+    updateDate: today,
+    outageStartupStatus: '0',
+    projectEndDate: new Date(Date.now() + 40 * 86400000).toISOString().split('T')[0] + ' 00:00:00',
+    // login.txt 内容通过 configInfo 传递
+    configInfo: `IP=193.112.221.196:80/hotel\nROOM_NUM=\nUN=${pinyinName}\nPWD=123`,
+    preFiles: '/system/coocaa_hotel',
+    commentary: `酒店创建: ${hotelName}`,
+  };
+
+  const res = await http.post(`${CONFIG.huashiUrl}/web/huashiconfig`, body, {
+    headers: { 'Content-Type': 'application/json', token },
+  });
+  if (res.data && res.data.code === 0 && res.data.data) {
+    return res.data.data; // 刷机码
+  }
+  throw new Error(`创建预设配置失败: ${JSON.stringify(res.data)}`);
+}
 
 // ==================== 工具函数 ====================
 
@@ -128,6 +224,7 @@ class HotelWorkflowExecutor {
     this.pinyinName = '';    // 拼音首字母用户名
     this.finalUsername = ''; // 最终创建成功的用户名
     this.eventEmitter = new EventEmitter();
+    this.flashCode = ''; // 刷机码
   }
 
   /** 注册进度监听 */
@@ -170,15 +267,23 @@ class HotelWorkflowExecutor {
       // Step 8: 创建用户（失败则重命名重试）
       await this.stepCreateUser();
 
+      // Step 9: 登录刷机平台并创建门店+配置
+      try {
+        await this.stepHuashi(this.pinyinName, hotelName);
+      } catch (err) {
+        this._progress('huashi', `⚠️ 刷机码步骤失败（可后续手动配置）: ${err.message}`);
+      }
+
       const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
       this._progress('done', `✅ 全部完成！耗时 ${elapsed} 秒`, {
         hotelName,
         hotelId: this.hotelId,
         pinyinName: this.pinyinName,
-        finalUsername: this.finalUsername
+        finalUsername: this.finalUsername,
+        flashCode: this.flashCode
       });
 
-      return { success: true, hotelName, hotelId: this.hotelId, pinyinName: this.pinyinName, finalUsername: this.finalUsername };
+      return { success: true, hotelName, hotelId: this.hotelId, pinyinName: this.pinyinName, finalUsername: this.finalUsername, flashCode: this.flashCode };
     } catch (err) {
       this._progress('error', `❌ 失败: ${err.message}`);
       return { success: false, error: err.message };
@@ -531,6 +636,26 @@ class HotelWorkflowExecutor {
     }
 
     throw new Error(`创建用户失败: 尝试 ${maxRetries} 次后仍未成功`);
+  }
+
+  /** Step 9: 刷机平台——创建门店+预设配置+生成刷机码 */
+  async stepHuashi(pinyinName, hotelName) {
+    this._progress('huashi', '正在登录刷机平台...');
+    await ensureHuashiToken();
+    this._progress('huashi', '刷机平台登录成功');
+
+    try {
+      this._progress('huashi', `正在创建门店: ${hotelName}`);
+      await huashiCreateShop(hotelName);
+      this._progress('huashi', '门店创建成功');
+    } catch (err) {
+      // 门店可能已存在，继续
+      this._progress('huashi', `门店创建（可能已存在）: ${err.message}`);
+    }
+
+    this._progress('huashi', '正在创建预设配置并生成刷机码...');
+    this.flashCode = await huashiCreateConfig(hotelName, pinyinName);
+    this._progress('huashi', `✅ 刷机码: ${this.flashCode}`);
   }
 }
 
